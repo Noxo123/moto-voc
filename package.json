@@ -1,11 +1,11 @@
 {
   "name": "moto-voc",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js"
+    "start": "node -r ./features-hook.js server.js",
+    "dev": "node --watch -r ./features-hook.js server.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.2",
