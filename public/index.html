@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Moto Voc</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<div id="auth" class="auth-screen"><div class="auth-card"><div class="logo">MOTO<span>VOC</span></div><p>La communauté moto, les amis et les vocaux au même endroit.</p><div id="authError" class="error"></div><input id="username" placeholder="Nom d'utilisateur"><input id="displayName" placeholder="Nom affiché"><input id="password" type="password" placeholder="Mot de passe"><button id="authBtn">Créer mon compte</button><button id="switchAuth" class="ghost">J'ai déjà un compte</button></div></div>
+<div id="app" class="app hidden">
+<aside class="sidebar"><div class="brand">MOTO<span>VOC</span></div><nav><button class="nav active" data-view="feed">⌂ <span>Accueil</span></button><button class="nav" data-view="friends">♙ <span>Amis</span></button><button class="nav" data-view="messages">▱ <span>Messages</span></button><button class="nav" data-view="groups">◈ <span>Groupes</span></button><button class="nav" data-view="voice">◉ <span>Vocaux</span></button></nav><div class="profile-mini"><div class="avatar" id="myAvatar">N</div><div><b id="myName">Utilisateur</b><small id="myUsername">@user</small></div><button id="logout">↪</button></div></aside>
+<main><header><div><h1 id="viewTitle">Accueil</h1><span class="sub" id="viewSub">Les dernières publications</span></div><div class="header-actions"><button class="icon" id="newPost">＋</button><button class="avatar" id="headerAvatar">N</button></div></header><section id="view"></section></main>
+</div>
+<div id="toast"></div><script src="/socket.io/socket.io.js"></script><script src="/app.js"></script>
+</body></html>
