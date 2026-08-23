@@ -1,23 +1,18 @@
-const express = require('express');
-const http = require('http');
-const crypto = require('crypto');
-const { Server } = require('socket.io');
-const Database = require('better-sqlite3');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const path = require('path');
-
-const app = express();
-const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: true, credentials: true } });
-const db = new Database(process.env.DATABASE_PATH || './moto-voc.sqlite');
-const JWT_SECRET = process.env.JWT_SECRET || 'change-this-secret-in-production';
-const PORT = Number(process.env.PORT || 3000);
-
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
-app.use(express.static(path.join(__dirname, 'public')));
-
+const express=require('express');
+const http=require('http');
+const crypto=require('crypto');
+const {Server}=require('socket.io');
+const Database=require('better-sqlite3');
+const bcrypt=require('bcryptjs');
+const jwt=require('jsonwebtoken');
+const path=require('path');
+const app=express();
+const server=http.createServer(app);
+const io=new Server(server,{cors:{origin:true,credentials:true}});
+const db=new Database(process.env.DATABASE_PATH||'./moto-voc.sqlite');
+const JWT_SECRET=process.env.JWT_SECRET||'change-this-secret-in-production';
+const PORT=Number(process.env.PORT||3000);
+app.use(express.json({limit:'10mb'}));app.use(express.urlencoded({extended:true}));app.use(express.static(path.join(__dirname,'public')));
 db.pragma('journal_mode = WAL');
 db.exec(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT,username TEXT NOT NULL UNIQUE,display_name TEXT NOT NULL,password_hash TEXT NOT NULL,avatar_url TEXT,bio TEXT DEFAULT '',created_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS friendships (id INTEGER PRIMARY KEY AUTOINCREMENT,requester_id INTEGER NOT NULL,addressee_id INTEGER NOT NULL,status TEXT NOT NULL CHECK(status IN ('pending','accepted','rejected','blocked')),created_at INTEGER NOT NULL,UNIQUE(requester_id,addressee_id));
@@ -28,21 +23,25 @@ CREATE TABLE IF NOT EXISTS comments (id INTEGER PRIMARY KEY AUTOINCREMENT,post_i
 CREATE TABLE IF NOT EXISTS groups (id INTEGER PRIMARY KEY AUTOINCREMENT,owner_id INTEGER NOT NULL,name TEXT NOT NULL,created_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS group_members (group_id INTEGER NOT NULL,user_id INTEGER NOT NULL,role TEXT NOT NULL DEFAULT 'member',created_at INTEGER NOT NULL,PRIMARY KEY(group_id,user_id));
 CREATE TABLE IF NOT EXISTS voice_rooms (id TEXT PRIMARY KEY,owner_id INTEGER NOT NULL,name TEXT NOT NULL,visibility TEXT NOT NULL CHECK(visibility IN ('public','private')),access_code_hash TEXT,max_users INTEGER NOT NULL DEFAULT 25,created_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS voice_room_members (room_id TEXT NOT NULL,user_id INTEGER NOT NULL,joined_at INTEGER NOT NULL,PRIMARY KEY(room_id,user_id));`);
-
+CREATE TABLE IF NOT EXISTS voice_room_members (room_id TEXT NOT NULL,user_id INTEGER NOT NULL,joined_at INTEGER NOT NULL,PRIMARY KEY(room_id,user_id));
+CREATE TABLE IF NOT EXISTS audit_logs (id INTEGER PRIMARY KEY AUTOINCREMENT,actor_id INTEGER,action TEXT NOT NULL,details TEXT DEFAULT '',created_at INTEGER NOT NULL);`);
+try{db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")}catch{}try{db.exec("ALTER TABLE users ADD COLUMN banned_until INTEGER")}catch{}try{db.exec("ALTER TABLE users ADD COLUMN ban_reason TEXT DEFAULT ''")}catch{}
 const now=()=>Date.now();
-const publicUser=r=>r&&({id:r.id,username:r.username,displayName:r.display_name,avatarUrl:r.avatar_url,bio:r.bio});
+const publicUser=r=>r&&({id:r.id,username:r.username,displayName:r.display_name,avatarUrl:r.avatar_url,bio:r.bio,role:r.role||'user'});
 const hashCode=c=>crypto.createHash('sha256').update(String(c)).digest('hex');
-function auth(req,res,next){const token=(req.headers.authorization||'').replace(/^Bearer\s+/i,'');try{req.user=jwt.verify(token,JWT_SECRET);next()}catch{res.status(401).json({error:'Authentification requise'})}}
+function auth(req,res,next){const token=(req.headers.authorization||'').replace(/^Bearer\s+/i,'');try{req.user=jwt.verify(token,JWT_SECRET);const u=db.prepare('SELECT * FROM users WHERE id=?').get(req.user.id);if(!u)return res.status(401).json({error:'Compte introuvable'});if(u.banned_until&&u.banned_until>now())return res.status(403).json({error:`Compte suspendu${u.ban_reason?`: ${u.ban_reason}`:''}`});req.dbUser=u;next()}catch{res.status(401).json({error:'Authentification requise'})}}
 function issueToken(u){return jwt.sign({id:u.id,username:u.username},JWT_SECRET,{expiresIn:'30d'})}
 function areFriends(a,b){return !!db.prepare(`SELECT 1 FROM friendships WHERE ((requester_id=? AND addressee_id=?) OR (requester_id=? AND addressee_id=?)) AND status='accepted'`).get(a,b,b,a)}
 function roomExists(id){return db.prepare('SELECT * FROM voice_rooms WHERE id=?').get(id)}
+function admin(req,res,next){if(!['owner','admin','moderator'].includes(req.dbUser?.role))return res.status(403).json({error:'Accès administrateur refusé'});next()}
+function ownerOrAdmin(req,res,next){if(!['owner','admin'].includes(req.dbUser?.role))return res.status(403).json({error:'Action réservée aux administrateurs'});next()}
+function audit(actor,action,details=''){db.prepare('INSERT INTO audit_logs(actor_id,action,details,created_at) VALUES(?,?,?,?)').run(actor,action,details,now())}
 
-app.post('/api/auth/register',async(req,res)=>{const {username,displayName,password}=req.body||{};if(!username||!displayName||!password||password.length<6)return res.status(400).json({error:'username, displayName et mot de passe (6 caractères minimum) requis'});try{const hash=await bcrypt.hash(password,12);const r=db.prepare('INSERT INTO users(username,display_name,password_hash,created_at) VALUES(?,?,?,?)').run(username.trim(),displayName.trim(),hash,now());const u=db.prepare('SELECT * FROM users WHERE id=?').get(r.lastInsertRowid);res.status(201).json({user:publicUser(u),token:issueToken(u)})}catch{res.status(409).json({error:'Nom d’utilisateur déjà utilisé'})}});
-app.post('/api/auth/login',async(req,res)=>{const u=db.prepare('SELECT * FROM users WHERE username=?').get(String(req.body?.username||'').trim());if(!u||!(await bcrypt.compare(String(req.body?.password||''),u.password_hash)))return res.status(401).json({error:'Identifiants invalides'});res.json({user:publicUser(u),token:issueToken(u)})});
-app.get('/api/me',auth,(req,res)=>res.json({user:publicUser(db.prepare('SELECT * FROM users WHERE id=?').get(req.user.id))}));
+app.post('/api/auth/register',async(req,res)=>{const {username,displayName,password}=req.body||{};if(!username||!displayName||!password||password.length<6)return res.status(400).json({error:'username, displayName et mot de passe (6 caractères minimum) requis'});try{const hash=await bcrypt.hash(password,12);const role=db.prepare('SELECT COUNT(*) c FROM users').get().c===0?'owner':'user';const r=db.prepare('INSERT INTO users(username,display_name,password_hash,role,created_at) VALUES(?,?,?,?,?)').run(username.trim(),displayName.trim(),hash,role,now());const u=db.prepare('SELECT * FROM users WHERE id=?').get(r.lastInsertRowid);res.status(201).json({user:publicUser(u),token:issueToken(u)})}catch{res.status(409).json({error:'Nom d’utilisateur déjà utilisé'})}});
+app.post('/api/auth/login',async(req,res)=>{const u=db.prepare('SELECT * FROM users WHERE username=?').get(String(req.body?.username||'').trim());if(!u||!(await bcrypt.compare(String(req.body?.password||''),u.password_hash)))return res.status(401).json({error:'Identifiants invalides'});if(u.banned_until&&u.banned_until>now())return res.status(403).json({error:`Compte suspendu${u.ban_reason?`: ${u.ban_reason}`:''}`});res.json({user:publicUser(u),token:issueToken(u)})});
+app.get('/api/me',auth,(req,res)=>res.json({user:publicUser(req.dbUser)}));
 
-app.post('/api/friends/request',auth,(req,res)=>{const target=db.prepare('SELECT * FROM users WHERE username=? OR id=?').get(String(req.body?.username||''),Number(req.body?.userId||0));if(!target||target.id===req.user.id)return res.status(400).json({error:'Utilisateur invalide'});const ex=db.prepare('SELECT * FROM friendships WHERE (requester_id=? AND addressee_id=?) OR (requester_id=? AND addressee_id=?)').get(req.user.id,target.id,target.id,req.user.id);if(ex)return res.status(409).json({error:'Relation déjà existante',friendship:ex});const r=db.prepare('INSERT INTO friendships(requester_id,addressee_id,status,created_at) VALUES(?,?,?,?)').run(req.user.id,target.id,'pending',now());io.to(`user:${target.id}`).emit('friend:request',{id:r.lastInsertRowid,from:publicUser(db.prepare('SELECT * FROM users WHERE id=?').get(req.user.id))});res.status(201).json({id:r.lastInsertRowid,status:'pending'})});
+app.post('/api/friends/request',auth,(req,res)=>{const target=db.prepare('SELECT * FROM users WHERE username=? OR id=?').get(String(req.body?.username||''),Number(req.body?.userId||0));if(!target||target.id===req.user.id)return res.status(400).json({error:'Utilisateur invalide'});const ex=db.prepare('SELECT * FROM friendships WHERE (requester_id=? AND addressee_id=?) OR (requester_id=? AND addressee_id=?)').get(req.user.id,target.id,target.id,req.user.id);if(ex)return res.status(409).json({error:'Relation déjà existante',friendship:ex});const r=db.prepare('INSERT INTO friendships(requester_id,addressee_id,status,created_at) VALUES(?,?,?,?)').run(req.user.id,target.id,'pending',now());io.to(`user:${target.id}`).emit('friend:request',{id:r.lastInsertRowid,from:publicUser(req.dbUser)});res.status(201).json({id:r.lastInsertRowid,status:'pending'})});
 app.get('/api/friends',auth,(req,res)=>{const rows=db.prepare(`SELECT f.*,u.id uid,u.username,u.display_name,u.avatar_url,u.bio FROM friendships f JOIN users u ON u.id=CASE WHEN f.requester_id=? THEN f.addressee_id ELSE f.requester_id END WHERE (f.requester_id=? OR f.addressee_id=?) AND f.status='accepted' ORDER BY u.display_name`).all(req.user.id,req.user.id,req.user.id);res.json({friends:rows.map(x=>({id:x.id,user:{id:x.uid,username:x.username,displayName:x.display_name,avatarUrl:x.avatar_url,bio:x.bio}}))})});
 app.get('/api/friends/requests',auth,(req,res)=>{const rows=db.prepare(`SELECT f.id,u.id uid,u.username,u.display_name,u.avatar_url,u.bio FROM friendships f JOIN users u ON u.id=f.requester_id WHERE f.addressee_id=? AND f.status='pending' ORDER BY f.created_at DESC`).all(req.user.id);res.json({requests:rows.map(x=>({id:x.id,user:{id:x.uid,username:x.username,displayName:x.display_name,avatarUrl:x.avatar_url,bio:x.bio}}))})});
 app.post('/api/friends/:id/accept',auth,(req,res)=>{const f=db.prepare("SELECT * FROM friendships WHERE id=? AND addressee_id=? AND status='pending'").get(req.params.id,req.user.id);if(!f)return res.status(404).json({error:'Demande introuvable'});db.prepare("UPDATE friendships SET status='accepted' WHERE id=?").run(f.id);io.to(`user:${f.requester_id}`).emit('friend:accepted',{friendId:req.user.id});res.json({ok:true})});
@@ -68,10 +67,24 @@ app.post('/api/voice/rooms/:id/join',auth,(req,res)=>{const room=roomExists(req.
 app.post('/api/voice/rooms/:id/leave',auth,(req,res)=>{db.prepare('DELETE FROM voice_room_members WHERE room_id=? AND user_id=?').run(req.params.id,req.user.id);res.json({ok:true})});
 app.delete('/api/voice/rooms/:id',auth,(req,res)=>{const room=roomExists(req.params.id);if(!room||room.owner_id!==req.user.id)return res.status(403).json({error:'Seul le propriétaire peut supprimer le salon'});db.prepare('DELETE FROM voice_room_members WHERE room_id=?').run(room.id);db.prepare('DELETE FROM voice_rooms WHERE id=?').run(room.id);io.emit('voice:room-deleted',{id:room.id});res.json({ok:true})});
 
+// Administration
+app.get('/api/admin/stats',auth,admin,(req,res)=>{const today=new Date();today.setHours(0,0,0,0);res.json({users:db.prepare('SELECT COUNT(*) c FROM users').get().c,posts:db.prepare('SELECT COUNT(*) c FROM posts').get().c,messages:db.prepare('SELECT COUNT(*) c FROM messages').get().c,voiceRooms:db.prepare('SELECT COUNT(*) c FROM voice_rooms').get().c,bannedUsers:db.prepare('SELECT COUNT(*) c FROM users WHERE banned_until>?').get(now()).c,pendingReports:0,onlineUsers:io.engine.clientsCount,todayPosts:db.prepare('SELECT COUNT(*) c FROM posts WHERE created_at>=?').get(today.getTime()).c})});
+app.get('/api/admin/users',auth,admin,(req,res)=>{const q=String(req.query.q||'').trim();const users=q?db.prepare('SELECT id,username,display_name,role,banned_until,ban_reason,created_at FROM users WHERE username LIKE ? OR display_name LIKE ? ORDER BY id DESC LIMIT 200').all(`%${q}%`,`%${q}%`):db.prepare('SELECT id,username,display_name,role,banned_until,ban_reason,created_at FROM users ORDER BY id DESC LIMIT 200').all();res.json({users})});
+app.patch('/api/admin/users/:id/role',auth,ownerOrAdmin,(req,res)=>{const id=Number(req.params.id),role=String(req.body?.role||'user');if(!['user','moderator','admin','owner'].includes(role))return res.status(400).json({error:'Rôle invalide'});const target=db.prepare('SELECT * FROM users WHERE id=?').get(id);if(!target)return res.status(404).json({error:'Utilisateur introuvable'});if(target.role==='owner'&&req.dbUser.role!=='owner')return res.status(403).json({error:'Seul le propriétaire peut modifier un propriétaire'});if(role==='owner'&&req.dbUser.role!=='owner')return res.status(403).json({error:'Seul le propriétaire peut attribuer owner'});db.prepare('UPDATE users SET role=? WHERE id=?').run(role,id);audit(req.user.id,'role_change',`#${id} ${target.role} -> ${role}`);io.to(`user:${id}`).emit('account:role',{role});res.json({ok:true})});
+app.post('/api/admin/users/:id/ban',auth,admin,(req,res)=>{const id=Number(req.params.id),target=db.prepare('SELECT * FROM users WHERE id=?').get(id);if(!target)return res.status(404).json({error:'Utilisateur introuvable'});if(target.role==='owner')return res.status(403).json({error:'Le propriétaire ne peut pas être suspendu'});if(target.role==='admin'&&req.dbUser.role!=='owner')return res.status(403).json({error:'Seul owner peut suspendre un admin'});const days=Math.min(3650,Math.max(1,Number(req.body?.days||7))),until=now()+days*86400000,reason=String(req.body?.reason||'Violation des règles').slice(0,300);db.prepare('UPDATE users SET banned_until=?,ban_reason=? WHERE id=?').run(until,reason,id);audit(req.user.id,'user_ban',`#${id} ${days}j: ${reason}`);io.to(`user:${id}`).emit('account:banned',{until,reason});res.json({ok:true,bannedUntil:until})});
+app.delete('/api/admin/users/:id/ban',auth,admin,(req,res)=>{const id=Number(req.params.id);db.prepare('UPDATE users SET banned_until=NULL,ban_reason=NULL WHERE id=?').run(id);audit(req.user.id,'user_unban',`#${id}`);io.to(`user:${id}`).emit('account:unbanned');res.json({ok:true})});
+app.get('/api/admin/content',auth,admin,(req,res)=>{res.json({posts:db.prepare(`SELECT p.id,p.content,p.created_at,u.username FROM posts p JOIN users u ON u.id=p.author_id ORDER BY p.created_at DESC LIMIT 100`).all(),comments:db.prepare(`SELECT c.id,c.content,c.created_at,u.username FROM comments c JOIN users u ON u.id=c.user_id ORDER BY c.created_at DESC LIMIT 100`).all()})});
+app.delete('/api/admin/posts/:id',auth,admin,(req,res)=>{const id=Number(req.params.id);db.prepare('DELETE FROM post_likes WHERE post_id=?').run(id);db.prepare('DELETE FROM comments WHERE post_id=?').run(id);db.prepare('DELETE FROM posts WHERE id=?').run(id);audit(req.user.id,'post_delete',`#${id}`);io.emit('post:deleted',{id});res.json({ok:true})});
+app.delete('/api/admin/comments/:id',auth,admin,(req,res)=>{const id=Number(req.params.id);db.prepare('DELETE FROM comments WHERE id=?').run(id);audit(req.user.id,'comment_delete',`#${id}`);io.emit('comment:deleted',{id});res.json({ok:true})});
+app.get('/api/admin/rooms',auth,admin,(req,res)=>res.json({rooms:db.prepare(`SELECT r.id,r.name,r.visibility,r.max_users,r.created_at,u.username owner_username,(SELECT COUNT(*) FROM voice_room_members m WHERE m.room_id=r.id) member_count FROM voice_rooms r JOIN users u ON u.id=r.owner_id ORDER BY r.created_at DESC`).all()}));
+app.delete('/api/admin/rooms/:id',auth,admin,(req,res)=>{const id=String(req.params.id);db.prepare('DELETE FROM voice_room_members WHERE room_id=?').run(id);db.prepare('DELETE FROM voice_rooms WHERE id=?').run(id);audit(req.user.id,'voice_room_close',id);io.emit('voice:room-deleted',{id});res.json({ok:true})});
+app.get('/api/admin/audit',auth,admin,(req,res)=>res.json({logs:db.prepare(`SELECT a.*,u.username actor_username FROM audit_logs a LEFT JOIN users u ON u.id=a.actor_id ORDER BY a.created_at DESC LIMIT 250`).all()}));
+app.post('/api/admin/broadcast',auth,admin,(req,res)=>{const title=String(req.body?.title||'Annonce').slice(0,100),message=String(req.body?.message||'').slice(0,500);io.emit('admin:notification',{title,message});audit(req.user.id,'broadcast',title);res.json({ok:true})});
+
 const socketUsers=new Map();
 io.use((socket,next)=>{try{const token=socket.handshake.auth?.token||String(socket.handshake.headers.authorization||'').replace(/^Bearer\s+/i,'');socket.user=jwt.verify(token,JWT_SECRET);next()}catch{next(new Error('unauthorized'))}});
 io.on('connection',socket=>{const uid=socket.user.id;socketUsers.set(socket.id,uid);socket.join(`user:${uid}`);socket.broadcast.emit('presence:update',{userId:uid,online:true});socket.on('dm:typing',({to,isTyping})=>{if(areFriends(uid,Number(to)))io.to(`user:${Number(to)}`).emit('dm:typing',{from:uid,isTyping:!!isTyping})});socket.on('voice:join',({roomId})=>{const room=roomExists(roomId);if(!room)return;socket.join(`voice:${roomId}`);socket.to(`voice:${roomId}`).emit('voice:peer-joined',{userId:uid});socket.emit('voice:peers',{peers:[...io.sockets.adapter.rooms.get(`voice:${roomId}`)||[]].map(id=>socketUsers.get(id)).filter(x=>x&&x!==uid)})});socket.on('voice:leave',({roomId})=>{socket.leave(`voice:${roomId}`);socket.to(`voice:${roomId}`).emit('voice:peer-left',{userId:uid})});socket.on('voice:signal',({to,data})=>{const target=Number(to);for(const [sid,userId] of socketUsers)if(userId===target)io.to(sid).emit('voice:signal',{from:uid,data})});socket.on('voice:mute',({roomId,muted})=>socket.to(`voice:${roomId}`).emit('voice:mute',{userId:uid,muted:!!muted}));socket.on('disconnect',()=>{socketUsers.delete(socket.id);socket.broadcast.emit('presence:update',{userId:uid,online:false})})});
-
 app.get('/api/health',(req,res)=>res.json({ok:true,service:'moto-voc',time:now()}));
+app.get('/admin',(req,res)=>res.sendFile(path.join(__dirname,'public','admin.html')));
 app.get('*',(req,res)=>res.sendFile(path.join(__dirname,'public','index.html')));
 server.listen(PORT,()=>console.log(`Moto Voc server running on http://localhost:${PORT}`));
